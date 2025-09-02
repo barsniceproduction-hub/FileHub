@@ -1,35 +1,9 @@
-// server.js
-const express = require("express");
-const multer = require("multer");
-const fs = require("fs");
-const path = require("path");
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-// Папка для файлов
-const UPLOAD_DIR = path.join(__dirname, "uploads");
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR);
-
-// Настройка Multer
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-  filename: (req, file, cb) => cb(null, file.originalname)
-});
-const upload = multer({ storage });
-
-// Админский пароль
-const ADMIN_PASS = "1234"; // поменяй на свой
-
-// Фронтенд
-app.get("/", (req, res) => {
-  res.send(`
 <!DOCTYPE html>
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FileHub</title>
+<title>FileHub Demo</title>
 <style>
   body{font-family:Arial,sans-serif;background:#0f1724;color:#eee;padding:20px;}
   h1{margin-bottom:10px;}
@@ -41,7 +15,8 @@ app.get("/", (req, res) => {
 </style>
 </head>
 <body>
-<h1>FileHub</h1>
+<h1>FileHub Demo</h1>
+
 <div id="adminArea">
   <h3>Загрузка файла (только для админа)</h3>
   <input type="file" id="fileInput">
@@ -61,105 +36,91 @@ app.get("/", (req, res) => {
 <div class="file-list" id="fileList"></div>
 
 <script>
+// Пароль админа
+const ADMIN_PASS = "1234";
+
+let db;
+const request = indexedDB.open("filehubDB", 1);
+request.onupgradeneeded = e=>{
+  db = e.target.result;
+  if(!db.objectStoreNames.contains("files")){
+    const store = db.createObjectStore("files",{keyPath:"name"});
+    store.createIndex("date","date",{unique:false});
+    store.createIndex("size","size",{unique:false});
+  }
+};
+request.onsuccess = e=>{db=e.target.result; renderFiles();}
+request.onerror = e=>console.error(e);
+
 const fileInput = document.getElementById("fileInput");
 const uploadBtn = document.getElementById("uploadBtn");
 const uploadMsg = document.getElementById("uploadMsg");
 const fileList = document.getElementById("fileList");
 const sortSelect = document.getElementById("sortSelect");
 
-async function loadFiles(){
-  const res = await fetch("/files");
-  let files = await res.json();
-  const sortBy = sortSelect.value;
-  if(sortBy==="name") files.sort((a,b)=>a.name.localeCompare(b.name));
-  if(sortBy==="date") files.sort((a,b)=>b.date - a.date);
-  if(sortBy==="size") files.sort((a,b)=>b.size - a.size);
-
-  fileList.innerHTML = "";
-  if(files.length===0){fileList.textContent="Файлов пока нет"; return;}
-  files.forEach(f=>{
-    const div = document.createElement("div");
-    div.className = "file-item";
-    const downloadBtn = document.createElement("button");
-    downloadBtn.textContent = "Скачать";
-    downloadBtn.onclick = ()=>window.open("/download/"+encodeURIComponent(f.name),"__blank");
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.textContent = "Удалить";
-    deleteBtn.onclick = async ()=>{
-      const pass = prompt("Введите пароль админа для удаления:");
-      if(pass !== "${ADMIN_PASS}") return alert("Неверный пароль!");
-      await fetch("/delete/"+encodeURIComponent(f.name),{method:"POST"});
-      loadFiles();
-    };
-
-    const sizeKB = (f.size/1024).toFixed(1);
-    const dateStr = new Date(f.date).toLocaleString();
-    div.innerHTML = "<strong>"+f.name+"</strong> <span class='small'>["+sizeKB+" KB, "+dateStr+"]</span> ";
-    div.appendChild(downloadBtn);
-    div.appendChild(deleteBtn);
-    fileList.appendChild(div);
-  });
-}
-
-sortSelect.onchange = loadFiles;
-
-// Загрузка файла
-uploadBtn.onclick = async () => {
+uploadBtn.onclick = ()=>{
   const file = fileInput.files[0];
   if(!file) return alert("Выберите файл");
   const pass = prompt("Введите пароль админа:");
-  if(pass !== "${ADMIN_PASS}") return alert("Неверный пароль!");
+  if(pass !== ADMIN_PASS) return alert("Неверный пароль!");
+  
+  const tx = db.transaction("files","readwrite");
+  const store = tx.objectStore("files");
+  store.put({name:file.name, blob:file, date:Date.now(), size:file.size});
+  tx.oncomplete = ()=>{uploadMsg.textContent=`Файл "${file.name}" успешно загружен`; fileInput.value=""; renderFiles();}
+  tx.onerror = ()=>uploadMsg.textContent="Ошибка при загрузке";
+}
 
-  const formData = new FormData();
-  formData.append("file", file);
+function renderFiles(){
+  const tx = db.transaction("files","readonly");
+  const store = tx.objectStore("files");
+  const req = store.getAll();
+  req.onsuccess = ()=>{
+    let files=req.result;
+    const sortBy = sortSelect.value;
+    if(sortBy==="name") files.sort((a,b)=>a.name.localeCompare(b.name));
+    if(sortBy==="date") files.sort((a,b)=>b.date - a.date);
+    if(sortBy==="size") files.sort((a,b)=>b.size - a.size);
 
-  const res = await fetch("/upload",{method:"POST",body:formData});
-  const json = await res.json();
-  if(json.success){
-    uploadMsg.textContent = "Файл '" + file.name + "' успешно загружен";
-    fileInput.value = "";
-    loadFiles();
-  } else uploadMsg.textContent="Ошибка при загрузке";
-};
+    fileList.innerHTML="";
+    if(files.length===0){fileList.textContent="Файлов пока нет"; return;}
+    files.forEach(f=>{
+      const div = document.createElement("div");
+      div.className="file-item";
 
-loadFiles();
+      const downloadBtn = document.createElement("button");
+      downloadBtn.textContent="Скачать";
+      downloadBtn.onclick=()=>{
+        const url = URL.createObjectURL(f.blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = f.name;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      const deleteBtn = document.createElement("button");
+      deleteBtn.textContent="Удалить";
+      deleteBtn.onclick=()=>{
+        const pass = prompt("Введите пароль админа для удаления:");
+        if(pass !== ADMIN_PASS) return alert("Неверный пароль!");
+        const tx = db.transaction("files","readwrite");
+        const store = tx.objectStore("files");
+        store.delete(f.name);
+        tx.oncomplete = renderFiles;
+      }
+
+      const sizeKB = (f.size/1024).toFixed(1);
+      const dateStr = new Date(f.date).toLocaleString();
+      div.innerHTML=`<strong>${f.name}</strong> <span class="small">[${sizeKB} KB, ${dateStr}]</span> `;
+      div.appendChild(downloadBtn);
+      div.appendChild(deleteBtn);
+      fileList.appendChild(div);
+    });
+  }
+}
+
+sortSelect.onchange=renderFiles;
 </script>
 </body>
 </html>
-  `);
-});
-
-// Загрузка файла
-app.post("/upload", upload.single("file"), (req,res)=>{
-  if(!req.file) return res.json({success:false});
-  res.json({success:true});
-});
-
-// Список файлов
-app.get("/files", (req,res)=>{
-  fs.readdir(UPLOAD_DIR,(err,files)=>{
-    if(err) return res.json([]);
-    const result = files.map(f=>{
-      const stat = fs.statSync(path.join(UPLOAD_DIR,f));
-      return {name:f, size:stat.size, date:stat.mtimeMs};
-    });
-    res.json(result);
-  });
-});
-
-// Скачивание
-app.get("/download/:filename",(req,res)=>{
-  const file = path.join(UPLOAD_DIR,req.params.filename);
-  if(fs.existsSync(file)) res.download(file);
-  else res.status(404).send("File not found");
-});
-
-// Удаление файла
-app.post("/delete/:filename",(req,res)=>{
-  const file = path.join(UPLOAD_DIR,req.params.filename);
-  if(fs.existsSync(file)) fs.unlinkSync(file);
-  res.json({success:true});
-});
-
-app.listen(PORT,()=>console.log("Server running on port "+PORT));
